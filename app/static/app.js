@@ -65,6 +65,7 @@ $("#btn-embed").addEventListener("click", async () => {
   try {
     const r = await api("/api/embed", { method: "POST", body: fd });
     state.jobId = r.job_id;
+    resetMatrixPanel();
     state.watermarkedUrl = `/api/jobs/${r.job_id}/watermarked?t=${Date.now()}`;
     state.targetUrl = null;
     state.markedUrl = null;
@@ -86,6 +87,7 @@ $("#btn-embed").addEventListener("click", async () => {
 
     $("#panel-attack").classList.remove("disabled");
     $("#btn-detect-attacked").disabled = false;
+    enableMatrixPanel();
     document.querySelector('.step[data-step="2"]').classList.add("active");
     switchTab("watermarked");
   } catch (err) {
@@ -153,6 +155,178 @@ $("#btn-attack-reset").addEventListener("click", async () => {
 
 $("#btn-detect-attacked").addEventListener("click", () =>
   runDetect(null, state.jobId, "attack"));
+
+/* ---------------- 鲁棒性矩阵评测（只读） ---------------- */
+
+const MATRIX_LIMIT = 3;
+
+function resetMatrixPanel() {
+  $("#panel-matrix").classList.add("disabled");
+  $("#matrix-result").classList.add("hidden");
+  const st = $("#matrix-status");
+  st.className = "status";
+  st.textContent = "";
+}
+
+function enableMatrixPanel() {
+  $("#panel-matrix").classList.remove("disabled");
+}
+
+$("#btn-matrix").addEventListener("click", async () => {
+  const status = $("#matrix-status");
+  if (!state.jobId) return fail(status, "请先完成嵌入。");
+
+  let qualities, fractions;
+  try {
+    qualities = collectMatrixInputs(".mq", "JPEG 质量", 10, 100, true);
+    fractions = collectMatrixInputs(".mf", "裁切保留比例", 20, 100, false)
+      .map((pct) => Math.round(pct) / 100);
+  } catch (err) {
+    return fail(status, err.message);
+  }
+
+  busy(status, "正在从含水印原图逐格执行先裁切后压缩与检测（最多 9 格）…");
+  $("#matrix-result").classList.add("hidden");
+  try {
+    const r = await api(`/api/jobs/${state.jobId}/robustness-matrix`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jpeg_qualities: qualities,
+        crop_fractions: fractions,
+      }),
+    });
+    renderMatrix(r);
+    ok(status,
+      `矩阵评测完成：${r.cells_success} / ${r.cells_total} 格恢复文本与原文一致，` +
+      `${r.boundary.length} 格位于最严成功边界。（任务图片 / 攻击历史 / 检测归档均未被改写）`);
+  } catch (err) {
+    fail(status, err.message);
+  }
+});
+
+function collectMatrixInputs(selector, label, min, max, isInt) {
+  const vals = [...document.querySelectorAll(selector)]
+    .map((el) => el.value.trim())
+    .filter((v) => v !== "")
+    .map((v) => {
+      const n = Number(v);
+      if (!Number.isFinite(n)) throw new Error(`${label} 输入不是有效数字。`);
+      return n;
+    });
+  if (vals.length < 1) throw new Error(`请至少选择 1 个${label}值。`);
+  if (vals.length > MATRIX_LIMIT) throw new Error(`${label}最多选择 ${MATRIX_LIMIT} 个值。`);
+  if (new Set(vals).size !== vals.length) throw new Error(`${label}不能重复。`);
+  for (const n of vals) {
+    if (n < min || n > max) throw new Error(`${label}必须在 ${min}~${max} 之间。`);
+    if (isInt && !Number.isInteger(n)) throw new Error(`${label}必须为整数。`);
+  }
+  return vals;
+}
+
+function pctLabel(f) {
+  return `${Math.round(f * 100)}%`;
+}
+
+function cellKey(q, f) {
+  return `${q}|${Number(f).toFixed(3)}`;
+}
+
+function renderMatrix(r) {
+  $("#matrix-result").classList.remove("hidden");
+  $("#matrix-original").textContent = r.original_text || "—";
+
+  const summary = $("#matrix-summary");
+  summary.innerHTML = `
+    <span class="chip">总格数 ${r.cells_total}</span>
+    <span class="chip">检测完成 ${r.cells_ok}</span>
+    <span class="chip">检出水印 ${r.cells_detected}</span>
+    <span class="chip">与原文一致 ${r.cells_success}</span>
+    <span class="chip">最严边界 ${r.boundary.length}</span>`;
+
+  const cellMap = new Map();
+  r.cells.forEach((c) => cellMap.set(cellKey(c.jpeg_quality, c.crop_fraction), c));
+  const boundaryKeys = new Set(
+    r.boundary.map((b) => cellKey(b.jpeg_quality, b.crop_fraction)));
+
+  const table = $("#matrix-table");
+  let html = "<thead><tr><th class='row-head'>JPEG Q ＼ 保留</th>";
+  r.crop_fractions.forEach((f) => {
+    html += `<th>${pctLabel(f)}</th>`;
+  });
+  html += "</tr></thead><tbody>";
+
+  r.jpeg_qualities.forEach((q) => {
+    html += `<tr><td class="row-head">Q${q}</td>`;
+    r.crop_fractions.forEach((f) => {
+      const c = cellMap.get(cellKey(q, f));
+      html += `<td>${c ? matrixCellHtml(c, boundaryKeys.has(cellKey(q, f))) : "—"}</td>`;
+    });
+    html += "</tr>";
+  });
+  html += "</tbody>";
+  table.innerHTML = html;
+
+  const bl = $("#matrix-boundary-list");
+  if (r.boundary.length) {
+    bl.innerHTML = "<b>最严成功边界</b>（只统计实际成功格，不做相邻推断）：" +
+      r.boundary.map((b) =>
+        `<code>Q${b.jpeg_quality} · ${pctLabel(b.crop_fraction)}</code>`).join("");
+  } else {
+    bl.innerHTML = "<b>最严成功边界：</b>本次评测没有任何格子恢复出与原文一致的文本。";
+  }
+}
+
+function matrixCellHtml(c, isBoundary) {
+  const cls = ["matrix-cell"];
+  if (!c.ok) cls.push("error", "fail");
+  else if (c.success) cls.push("ok");
+  else if (c.detected) cls.push("detected");
+  else cls.push("fail");
+  if (isBoundary) cls.push("boundary");
+
+  let body;
+  if (!c.ok) {
+    body = `<span class="mc-mark">⚙ 异常</span>
+            <span class="mc-metrics">${escapeHtml(c.error || "检测器异常")}</span>`;
+  } else if (c.success) {
+    body = `<span class="mc-mark">✔ 一致</span>
+            <span class="mc-text">${escapeHtml(c.recovered_text)}</span>
+            <span class="mc-metrics">
+              置信 ${c.metrics.confidence}% · 同步 ${Math.abs(c.metrics.sync_score).toFixed(2)}
+              · 一致率 ${(c.metrics.sync_agreement * 100).toFixed(0)}%
+            </span>`;
+  } else if (c.detected) {
+    body = `<span class="mc-mark">⚠ 不一致</span>
+            <span class="mc-text diff">${escapeHtml(c.recovered_text || "")}</span>
+            <span class="mc-metrics">
+              置信 ${c.metrics.confidence}% · 同步 ${Math.abs(c.metrics.sync_score).toFixed(2)}
+            </span>`;
+  } else {
+    body = `<span class="mc-mark">✘ 未恢复</span>
+            <span class="mc-metrics">${escapeHtml(c.reason || "未通过载荷校验")}</span>
+            <span class="mc-metrics">
+              同步 ${c.metrics ? Math.abs(c.metrics.sync_score).toFixed(2) : "—"}
+            </span>`;
+  }
+
+  const m = c.metrics || {};
+  const tip = [
+    `JPEG Q${c.jpeg_quality} · 保留 ${pctLabel(c.crop_fraction)}` +
+      `（先裁切后压缩，输出 ${c.width}×${c.height}px）`,
+    c.detected ? `恢复文本：${c.recovered_text}` : "未检出可校验水印",
+    `与原文一致：${c.success ? "是" : "否"}`,
+    `置信度：${m.confidence ?? "—"}%`,
+    `同步相关峰：${m.sync_score ?? "—"}`,
+    `同步块一致率：${m.sync_agreement ?? "—"}`,
+    `同步瓦片：${m.tiles_y ?? "—"}×${m.tiles_x ?? "—"}`,
+    `每比特投票：${m.votes_per_bit ?? "—"}`,
+    c.reason || "",
+  ].filter(Boolean).join("\n");
+
+  const tag = isBoundary ? '<span class="mc-tag">边界</span>' : "";
+  return `<div class="${cls.join(" ")}" title="${escapeHtml(tip)}">${tag}${body}</div>`;
+}
 
 /* ---------------- 独立检测 ---------------- */
 

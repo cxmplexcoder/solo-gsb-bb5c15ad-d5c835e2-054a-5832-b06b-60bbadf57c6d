@@ -6,6 +6,7 @@
   POST /api/attack       对任务图片施加 JPEG 重压缩 / 中心裁切
   POST /api/detect       上传图片或引用任务图片 -> 水印检测结果 + 失真叠加图；
                           独立上传可选 auto_orient=true 做 8 方向自动检索
+  POST /api/jobs/{id}/robustness-matrix  只读：质量×裁切组合逐格独立评测 + 最严成功边界
   POST /api/privacy-check  上传 PNG/JPEG -> 只读解析 EXIF 拍摄时间/相机/GPS（不落盘、不建任务）
   GET  /api/jobs/{id}/{kind}  任务文件下载（original/watermarked/target/marked）
   GET  /api/jobs/{id}/detections/{det_id}/{kind}  某次检测的输入快照 / 标注图
@@ -30,7 +31,7 @@ from PIL import Image
 from pydantic import BaseModel
 
 from . import archive, dctwm as wm
-from . import exifcheck, orientation
+from . import exifcheck, orientation, robustness
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -40,7 +41,7 @@ MAX_UPLOAD_BYTES = 16 * 1024 * 1024
 MAX_DIM = 4096
 ALLOWED_KINDS = {"original", "watermarked", "target", "marked"}
 
-app = FastAPI(title="抗裁切水印实验台", version="1.2.0")
+app = FastAPI(title="抗裁切水印实验台", version="1.3.0")
 
 
 # ---------------------------------------------------------------- 任务存储
@@ -135,6 +136,11 @@ class AttackRequest(BaseModel):
 
 class ReportRequest(BaseModel):
     detection_ids: list[str]               # 收录进报告的检测记录（至少一次）
+
+
+class RobustnessMatrixRequest(BaseModel):
+    jpeg_qualities: list[int]              # 至多 3 个，10~100
+    crop_fractions: list[float]            # 至多 3 个，0.2~1.0
 
 
 def _algo_params() -> dict:
@@ -241,6 +247,90 @@ def attack(req: AttackRequest):
 def _truthy(v: str | None) -> bool:
     return (v or "").strip().lower() in ("1", "true", "yes", "on")
 
+
+def _normalize_matrix_points(values: list, kind: str) -> list:
+    """校验并去重矩阵轴参数；kind="quality" / "fraction"。"""
+    if not 1 <= len(values) <= robustness.MAX_POINTS_PER_AXIS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{kind} 需选择 1~{robustness.MAX_POINTS_PER_AXIS} 个值。")
+    try:
+        nums = [float(v) for v in values]
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail=f"{kind} 参数格式非法。")
+    if any(n != n for n in nums):           # NaN
+        raise HTTPException(status_code=400, detail=f"{kind} 参数格式非法。")
+    if len(set(nums)) != len(nums):
+        raise HTTPException(status_code=400, detail=f"{kind} 不能重复选择。")
+
+    if kind == "JPEG 质量":
+        lo, hi = robustness.QUALITY_MIN, robustness.QUALITY_MAX
+        if any(n < lo or n > hi or abs(n - round(n)) > 1e-9 for n in nums):
+            raise HTTPException(
+                status_code=400, detail=f"JPEG 质量必须为 {lo}~{hi} 的整数。")
+        return sorted((int(n) for n in nums), reverse=True)
+
+    lo, hi = robustness.FRACTION_MIN, robustness.FRACTION_MAX
+    if any(n < lo or n > hi for n in nums):
+        raise HTTPException(
+            status_code=400,
+            detail=f"中心裁切保留比例必须在 {lo}~{hi} 之间。")
+    return sorted((round(n, 3) for n in nums), reverse=True)
+
+
+@app.post("/api/jobs/{job_id}/robustness-matrix")
+def robustness_matrix(job_id: str, req: RobustnessMatrixRequest):
+    """只读鲁棒性矩阵：从同一份含水印原图出发，逐组先裁切后压缩再检测。
+
+    不触碰 original/watermarked/target/marked、不追加攻击历史、不写检测记录、
+    不生成归档报告。
+    """
+    _ensure_data_dir()
+    meta = _load_meta(job_id)
+    if meta.get("upload_only"):
+        raise HTTPException(
+            status_code=400,
+            detail="该任务来自独立上传检测，没有可评测的含水印原图，请先完成「嵌入」。")
+    source = DATA_DIR / job_id / "watermarked.png"
+    if not source.exists():
+        raise HTTPException(status_code=404, detail="该任务没有含水印图。")
+
+    qualities = _normalize_matrix_points(req.jpeg_qualities, "JPEG 质量")
+    fractions = _normalize_matrix_points(req.crop_fractions, "中心裁切保留比例")
+
+    watermarked = np.array(Image.open(source).convert("RGB"))
+    result = robustness.run_matrix(
+        watermarked, meta.get("text", ""), qualities, fractions)
+
+    cells = result["cells"]
+    success = [c for c in cells if c["success"]]
+    detected = [c for c in cells if c["detected"]]
+    return JSONResponse({
+        "job_id": job_id,
+        "original_text": meta.get("text", ""),
+        "pipeline": ["center_crop", "jpeg"],
+        "jpeg_qualities": qualities,
+        "crop_fractions": fractions,
+        "cells_total": len(cells),
+        "cells_ok": sum(1 for c in cells if c["ok"]),
+        "cells_detected": len(detected),
+        "cells_success": len(success),
+        "cells": cells,
+        "success_points": [
+            {"jpeg_quality": q, "crop_fraction": f}
+            for q, f in result["success_points"]
+        ],
+        "boundary": [
+            {"jpeg_quality": q, "crop_fraction": f}
+            for q, f in result["boundary"]
+        ],
+        "boundary_rule": (
+            "仅按实际成功格计算：若另一成功格质量不高于它且保留比例不大于它，"
+            "并至少一项更严，则该格不在边界；不以相邻格推断结果。"),
+    })
+
+
+# ---------------------------------------------------------------- 检测核心
 
 @app.post("/api/detect")
 async def detect(

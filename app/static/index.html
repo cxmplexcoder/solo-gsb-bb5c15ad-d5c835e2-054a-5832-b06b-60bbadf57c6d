@@ -90,6 +90,55 @@
       <button class="primary subtle" id="btn-detect-attacked" disabled>检测受攻击图片 ③</button>
     </section>
 
+    <section class="panel disabled" id="panel-matrix">
+      <h2><span class="num">▦</span> 鲁棒性矩阵评测（只读）</h2>
+      <p class="muted">
+        从<b>同一份含水印原图</b>为每个组合独立执行<b>先中心裁切、后 JPEG 压缩</b>，
+        再调用现有检测器。每轴最多 3 个值（最多 9 格），逐格返回恢复文本、
+        是否与任务原文一致及置信度 / 同步指标，并标出仅按实际成功格计算的
+        <b>二维最严成功边界</b>。评测<b>不修改</b>任务图片、攻击历史与检测归档。
+      </p>
+
+      <div class="field">
+        <span>JPEG 质量（至多 3 个，10–100；留空表示不选）</span>
+        <div class="matrix-inputs" id="matrix-q-inputs">
+          <input type="number" class="mq" min="10" max="100" step="1" value="90" />
+          <input type="number" class="mq" min="10" max="100" step="1" value="60" />
+          <input type="number" class="mq" min="10" max="100" step="1" value="30" />
+        </div>
+      </div>
+
+      <div class="field">
+        <span>中心裁切保留比例（至多 3 个，20%–100%；留空表示不选）</span>
+        <div class="matrix-inputs" id="matrix-f-inputs">
+          <input type="number" class="mf" min="20" max="100" step="1" value="100" />
+          <input type="number" class="mf" min="20" max="100" step="1" value="75" />
+          <input type="number" class="mf" min="20" max="100" step="1" value="50" />
+        </div>
+        <small class="muted">裁切边界吸附到 8px 网格；每格均从含水印原图重新出发，不与其他格叠加。</small>
+      </div>
+
+      <button class="primary matrix" id="btn-matrix">运行鲁棒性矩阵评测</button>
+      <div class="status" id="matrix-status"></div>
+
+      <div id="matrix-result" class="matrix-box hidden">
+        <div class="muted">
+          任务原文：<code id="matrix-original">—</code>
+        </div>
+        <div id="matrix-summary" class="matrix-summary"></div>
+        <div class="table-scroll">
+          <table class="matrix-table" id="matrix-table"></table>
+        </div>
+        <div class="matrix-legend">
+          <span><i class="mc ok"></i>成功（恢复文本 = 原文）</span>
+          <span><i class="mc detected"></i>检出但文本不一致 / 校验失败</span>
+          <span><i class="mc fail"></i>未恢复</span>
+          <span><i class="mc boundary"></i>最严成功边界</span>
+        </div>
+        <div id="matrix-boundary-list" class="boundary-list"></div>
+      </div>
+    </section>
+
     <section class="panel" id="panel-detect-upload">
       <h2><span class="num">③</span> 独立检测（可选）</h2>
       <p class="muted">上传任意图片（含水印图、截图、JPEG 转发件等）直接检测，无需先嵌入。</p>
