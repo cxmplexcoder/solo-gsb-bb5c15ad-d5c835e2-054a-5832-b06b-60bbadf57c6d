@@ -23,6 +23,9 @@ docker compose up -d --build
 
 > **http://localhost:8000**
 
+嵌入水印后，在首页左栏「② 施加攻击」下方即可进入「**▦ 鲁棒性矩阵评测**」
+（同一端口、同一容器，无需额外服务或端口；compose 配置保持不变）。
+
 停止 / 清理：
 
 ```bash
@@ -60,6 +63,34 @@ WM_DATA_DIR=./data uvicorn app.main:app --host 0.0.0.0 --port 8000
    - 「失真标注图」用颜色标出健康/受损瓦片、判决错误块、可疑弱块，可**下载 PNG**。
 
 此外，「独立检测」区支持直接上传任意图片（含水印图、JPEG 转发件、截图等）进行盲检测。
+
+### 鲁棒性矩阵评测（只读批量，不改写任务）
+
+完成 ① 嵌入后，页面左栏的「**▦ 鲁棒性矩阵评测**」面板可用。入口：
+首页 **http://localhost:8000** → 左栏「② 施加攻击」下方的「**▦ 鲁棒性矩阵评测**」。
+
+- **参数**：至多 **3 个 JPEG 质量**（20–100，整数；留空的输入框忽略）与
+  至多 **3 个中心裁切保留比例**（30%–100%，吸附 8px 网格；留空忽略），
+  两轴笛卡尔积，最多 3 × 3 = 9 格，两轴都至少各填 1 个、轴内不可重复。
+- **执行方式**：服务端从该任务**同一份含水印原图 `watermarked.png`** 为每个组合
+  **独立**执行「**先中心裁切、后 JPEG 压缩**」（不叠加、不复用攻击面板的 `target.png`），
+  再调用与③完全相同的现有检测器；逐格返回**恢复文本、是否与任务原文一致、
+  总体置信度、同步相关峰、同步块一致率、瓦片/载荷块数、每比特票数、失真块占比**
+  等指标（悬停单元格查看全部）。
+- **二维最严成功边界**：只把**实际成功**（恢复文本与任务原文逐字一致）的格纳入计算——
+  若存在另一成功格的 JPEG 质量**不高于**它、保留比例**不大于**它，且**至少一项更严**
+  （数值更小），则该格被支配、不在边界上；边界格在表格中以 ★ / 蓝色描边标出，
+  并在下方以 chip 列出。判定只用实测格之间的二维偏序，
+  **不以相邻格或中间未测组合推断结果**；没有任何成功格时边界为空。
+- **只读、不改写**：评测全程在内存中进行，**不生成 `target.png`、不改 `meta.json`
+  与攻击历史、不写检测记录（`detections/`）、不生成报告、不追加归档日志**；
+  任务图片、攻击历史和检测归档在评测前后字节级一致。可反复重跑，互不影响。
+- 表格行 = 裁切保留比例（上→下更狠），列 = JPEG 质量（左→右更轻）；
+  绿格=恢复一致，黄格=检测到但文本不一致，红格=未恢复/失败。
+
+对应接口：`POST /api/jobs/{job_id}/robustness-matrix`
+（请求体 `{"jpeg_qualities": [90,50,30], "crop_fractions": [1.0,0.75,0.5]}`），
+访问地址即首页所在服务，无需额外端口或容器。
 
 ### 独立检测的自动方向检索（可选）
 
@@ -242,6 +273,7 @@ WM_DATA_DIR=./data uvicorn app.main:app --host 0.0.0.0 --port 8000
 | POST | `/api/embed` | multipart：`image`(图片)、`text`、`strength`(low/medium/high)，返回任务 ID 与嵌入指标 |
 | POST | `/api/attack` | JSON：`{job_id, jpeg_quality?, crop_fraction?}`，生成受攻击待测图 |
 | POST | `/api/detect` | multipart：上传 `image` **或**传 `job_id`，返回文本、置信度、指标、检测记录 ID 与标注图 URL；独立上传可加 `auto_orient=true` 启用 8 方向自动检索（原向 / 90 / 180 / 270° + 水平镜像四方向），响应附带 `orientation_search`（入选方向、候选摘要、冲突），入选方向标注图已逆变换回上传图坐标 |
+| POST | `/api/jobs/{id}/robustness-matrix` | JSON：`{"jpeg_qualities": [90,50,30], "crop_fractions": [1.0,0.75,0.5]}`（各 1–3 个、不可重复；质量 20–100、比例 0.30–1.00）。**只读**：从同一份含水印原图为每格独立「先裁切后压缩」再调用现有检测器，逐格返回恢复文本 / 与原文是否一致 / 置信度与同步指标，并给出只按实测成功格计算的 `boundary`（二维最严成功边界，不做相邻推断）；不写 `target.png`、不改攻击历史、不产生检测记录与归档 |
 | POST | `/api/privacy-check` | multipart：上传 PNG/JPEG `image`，**只读**解析 EXIF 拍摄时间、相机品牌/型号、GPS（带符号十进制度）；不落盘、不建任务，字段缺失为 `null`，EXIF 损坏返回 200 + `warnings` |
 | GET | `/api/jobs/{id}/{kind}` | 下载 `original` / `watermarked` / `target` / `marked` PNG |
 | GET | `/api/jobs/{id}/detections/{det_id}/{kind}` | 下载某次检测的 `source`（检测输入快照）/ `marked`（标注图）PNG |
@@ -300,6 +332,43 @@ WM_DATA_DIR=./data uvicorn app.main:app --host 0.0.0.0 --port 8000
 > `conflict=true` 时 `conflict_texts` 列出有效候选恢复出的互不相同文本；
 > 此时顶层 `text` 只是置信度最高候选的结果，不应作为唯一结论。
 > 普通检测（不带 `auto_orient` 或 `false`）响应中 `orientation_search` 为 `null`。
+
+鲁棒性矩阵响应（节选；`cells` 逐格、`boundary` 为实测成功格的二维最严边界）：
+
+```json
+{
+  "job_id": "756b2203d38f",
+  "text": "机密-2026",
+  "jpeg_qualities": [30, 50, 90],
+  "crop_fractions": [0.5, 0.75, 1.0],
+  "cells": [
+    {
+      "jpeg_quality": 30, "crop_fraction": 0.5,
+      "ok": true, "detected": false, "text": "", "text_match": false,
+      "reason": "未找到同步网格（相关峰值过低）…",
+      "width": 192, "height": 192,
+      "snapped_fraction_w": 0.5, "snapped_fraction_h": 0.5,
+      "metrics": { "confidence": 0.0, "sync_score": 0.31,
+                   "sync_agreement": 0.0, "tiles_y": 1, "tiles_x": 1 },
+      "on_boundary": false
+    },
+    {
+      "jpeg_quality": 50, "crop_fraction": 0.5,
+      "ok": true, "detected": true, "text": "机密-2026", "text_match": true,
+      "metrics": { "confidence": 100.0, "sync_score": 1.0,
+                   "sync_agreement": 1.0, "votes_per_bit": 9 },
+      "on_boundary": true
+    }
+  ],
+  "boundary": [ { "jpeg_quality": 50, "crop_fraction": 0.5 } ],
+  "counts": { "cells": 9, "successful": 6, "failed": 3, "boundary": 1 },
+  "inference": "boundary 仅由实测成功格按二维偏序计算，未测组合不推断"
+}
+```
+
+> 参数非法（空轴 / 每轴超过 3 个 / 越界 / 重复）返回 **400**；请求体缺字段返回 **422**；
+> 任务不存在或为「独立检测」轻量任务（无含水印图）返回 **404**。
+> 评测为只读操作，响应中的成功/失败完全不改变任务目录与归档。
 
 隐私检查响应（节选；缺失字段为 `null`，前端显示「无」）：
 
@@ -364,16 +433,18 @@ compose 默认把数据目录持久化到命名卷 `wm-data`；归档报告与�
 .
 ├── app/
 │   ├── dctwm.py          # 核心算法：DCT 嵌入 / PN 同步 / 相移搜索 / 多数表决 / 失真标注
+│   ├── matrix.py         # 鲁棒性矩阵：质量×裁切逐格「先裁切后压缩」评测 / 实测成功格二维最严边界（只读、不落盘）
 │   ├── orientation.py    # 独立上传可选：8 方向（旋转 + 水平镜像）自动检索 / 载荷校验取舍 / 标注图逆变换
 │   ├── exifcheck.py      # 图片隐私检查：只读解析 EXIF 拍摄时间 / 相机 / GPS（损坏不阻断、不落盘）
 │   ├── archive.py        # 检测报告：规范化 JSON / SHA-256 清单 / 仅追加哈希链归档 / 校验
-│   ├── main.py           # FastAPI：任务存储、嵌入/攻击/检测/隐私检查/报告接口、静态资源
+│   ├── main.py           # FastAPI：任务存储、嵌入/攻击/检测/鲁棒性矩阵/隐私检查/报告接口、静态资源
 │   └── static/
-│       ├── index.html    # 单页界面（嵌入 / 攻击 / 检测 / 隐私检查 / 归档 五区）
+│       ├── index.html    # 单页界面（嵌入 / 攻击 / 鲁棒性矩阵 / 检测 / 隐私检查 / 归档 六区）
 │       ├── style.css
 │       └── app.js
 ├── tests/
 │   ├── test_core.py      # 核心算法数值验证（DCT/PN/鲁棒性全链路）
+│   ├── test_matrix.py    # 鲁棒性矩阵：边界偏序（严格支配/不推断缺口）/ 参数校验 / 只读不改写 / 接口
 │   ├── test_orientation.py # 自动方向检索：8 向枚举 / 同分取舍 / 冲突 / 逆变换 / 归档
 │   ├── test_privacy.py   # 隐私检查接口：EXIF 解析 / DMS 还原 / 缺失与损坏 / 不落盘不阻断
 │   └── test_reports.py   # 报告归档接口与清单/哈希链校验（篡改、缺失、断链）

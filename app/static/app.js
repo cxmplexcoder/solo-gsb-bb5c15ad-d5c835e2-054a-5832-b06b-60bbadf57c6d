@@ -72,6 +72,7 @@ $("#btn-embed").addEventListener("click", async () => {
     state.report = null;
     renderDetectList();
     resetReportBox();
+    resetMatrixPanel();
     showImage("watermarked", state.watermarkedUrl);
     $("#img-target").removeAttribute("src");
     $("#img-marked").removeAttribute("src");
@@ -85,6 +86,7 @@ $("#btn-embed").addEventListener("click", async () => {
     ok(status, "嵌入成功，请查看「含水印图」标签。");
 
     $("#panel-attack").classList.remove("disabled");
+    $("#panel-matrix").classList.remove("disabled");
     $("#btn-detect-attacked").disabled = false;
     document.querySelector('.step[data-step="2"]').classList.add("active");
     switchTab("watermarked");
@@ -153,6 +155,171 @@ $("#btn-attack-reset").addEventListener("click", async () => {
 
 $("#btn-detect-attacked").addEventListener("click", () =>
   runDetect(null, state.jobId, "attack"));
+
+/* ---------------- 鲁棒性矩阵评测（只读批量） ---------------- */
+
+function readMatrixInputs(cls, kind) {
+  const vals = [...document.querySelectorAll(`.${cls}`)]
+    .map((el) => el.value.trim())
+    .filter((v) => v !== "")
+    .map((v) => Number(v));
+  if (!vals.length) {
+    throw new Error(kind === "q"
+      ? "请至少填写 1 个 JPEG 质量。"
+      : "请至少填写 1 个裁切保留比例。");
+  }
+  if (vals.some((v) => !Number.isFinite(v))) {
+    throw new Error(kind === "q"
+      ? "JPEG 质量必须是数字。"
+      : "裁切保留比例必须是数字。");
+  }
+  if (new Set(vals).size !== vals.length) {
+    throw new Error(kind === "q"
+      ? "JPEG 质量不能重复。"
+      : "裁切保留比例不能重复。");
+  }
+  if (kind === "q") {
+    if (vals.some((v) => v < 20 || v > 100)) {
+      throw new Error("JPEG 质量需在 20–100 之间。");
+    }
+  } else if (vals.some((v) => v < 30 || v > 100)) {
+    throw new Error("裁切保留比例需在 30%–100% 之间。");
+  }
+  return vals;
+}
+
+$("#btn-matrix").addEventListener("click", async () => {
+  const status = $("#matrix-status");
+  if (!state.jobId) return fail(status, "请先完成嵌入。");
+  let qualities, cropPercents;
+  try {
+    qualities = readMatrixInputs("matrix-q", "q");
+    cropPercents = readMatrixInputs("matrix-c", "c");
+  } catch (err) {
+    return fail(status, err.message);
+  }
+  busy(status, `正在对 ${qualities.length * cropPercents.length} 个组合逐一执行先裁切后压缩与检测…`);
+  try {
+    const r = await api(
+      `/api/jobs/${state.jobId}/robustness-matrix`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jpeg_qualities: qualities,
+          crop_fractions: cropPercents.map((p) => p / 100),
+        }),
+      }
+    );
+    renderMatrix(r);
+    ok(status, `矩阵评测完成：${r.counts.successful}/${r.counts.cells} 格恢复一致，最严成功边界 ${r.counts.boundary} 格（未改写任务数据）。`);
+  } catch (err) {
+    $("#matrix-result").classList.add("hidden");
+    fail(status, err.message);
+  }
+});
+
+function cellClass(c) {
+  if (!c.ok) return "fail";
+  if (c.text_match) return "ok";
+  if (c.detected) return "diff";
+  return "fail";
+}
+
+function cellTitle(c) {
+  const lines = [
+    `JPEG Q${c.jpeg_quality} × 裁切 ${Math.round(c.crop_fraction * 100)}%`,
+  ];
+  if (c.ok) {
+    if (c.detected) {
+      lines.push(`恢复文本：${c.text || "（空）"}`);
+    } else {
+      lines.push(`未恢复：${c.reason || "—"}`);
+    }
+    if (c.metrics) {
+      const m = c.metrics;
+      lines.push(
+        `置信度 ${m.confidence}% · 同步峰 ${m.sync_score} · 一致率 ${(m.sync_agreement * 100).toFixed(1)}%`
+      );
+      lines.push(
+        `瓦片 ${m.tiles_y}×${m.tiles_x} · 同步块 ${m.sync_blocks} · 载荷块 ${m.payload_blocks} · 票/bit ${m.votes_per_bit}`
+      );
+      lines.push(
+        `失真块 ${m.marked_blocks}/${m.total_blocks}（${(m.marked_fraction * 100).toFixed(1)}%）`
+      );
+    }
+    if (c.width != null) {
+      lines.push(`攻击后尺寸 ${c.width}×${c.height}px（吸附后 ${Math.round((c.snapped_fraction_w ?? 0) * 100)}%×${Math.round((c.snapped_fraction_h ?? 0) * 100)}%）`);
+    }
+  } else {
+    lines.push(c.reason || "评测执行失败");
+  }
+  return lines.join("\n");
+}
+
+function renderMatrix(r) {
+  $("#matrix-result").classList.remove("hidden");
+
+  // 显示顺序：质量从高到轻（列，左→右更轻），保留比例从大到小（行，上→下更轻）
+  const qs = [...r.jpeg_qualities].sort((a, b) => b - a);
+  const fs = [...r.crop_fractions].sort((a, b) => b - a);
+  const key = (q, f) => `${q}:${f}`;
+  const map = new Map(r.cells.map((c) => [key(c.jpeg_quality, c.crop_fraction), c]));
+
+  const tbl = $("#matrix-table");
+  tbl.innerHTML = "";
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  headRow.innerHTML = `<th title="行=中心裁切保留比例，列=JPEG 质量">裁切 ＼ JPEG</th>` +
+    qs.map((q) => `<th>Q${q}</th>`).join("");
+  thead.appendChild(headRow);
+  tbl.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  fs.forEach((f) => {
+    const tr = document.createElement("tr");
+    const th = document.createElement("th");
+    th.textContent = `${Math.round(f * 100)}%`;
+    tr.appendChild(th);
+    qs.forEach((q) => {
+      const c = map.get(key(q, f));
+      const td = document.createElement("td");
+      if (!c) {
+        td.className = "fail";
+        td.textContent = "—";
+      } else {
+        td.className = `mx-cell ${cellClass(c)}` + (c.on_boundary ? " boundary" : "");
+        const mark = c.text_match
+          ? (c.on_boundary ? "★" : "✔")
+          : c.detected ? "≠" : "✘";
+        const conf = c.ok && c.metrics ? `${c.metrics.confidence}%` : "—";
+        td.innerHTML = `<div class="mx-mark">${mark}</div><div class="mx-conf">${conf}</div>`;
+        td.title = cellTitle(c);
+      }
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  tbl.appendChild(tbody);
+
+  $("#matrix-summary").innerHTML =
+    `任务原文 <code>${escapeHtml(r.text || "（空）")}</code> · 共 ${r.counts.cells} 格 · ` +
+    `<b class="mx-ok-text">一致 ${r.counts.successful}</b> · ` +
+    `<span class="mx-fail-text">未恢复/不一致 ${r.counts.failed}</span> · ` +
+    `最严成功边界 <b>${r.counts.boundary}</b> 格`;
+
+  const box = $("#matrix-boundary-list");
+  box.innerHTML = "";
+  if (r.boundary.length) {
+    box.innerHTML =
+      `<span class="muted">二维最严成功边界（只含实测格，不做相邻推断）：</span>` +
+      r.boundary.map((b) =>
+        `<span class="chip boundary-chip">★ Q${b.jpeg_quality} · 裁切 ${Math.round(b.crop_fraction * 100)}%</span>`
+      ).join(" ");
+  } else {
+    box.innerHTML = `<span class="mx-fail-text">所选组合中没有任何一格恢复出与原文一致的文本，因此不存在成功边界。</span>`;
+  }
+}
 
 /* ---------------- 独立检测 ---------------- */
 
@@ -577,6 +744,14 @@ function formatBytes(n) {
 }
 
 /* ---------------- UI 辅助 ---------------- */
+
+function resetMatrixPanel() {
+  $("#panel-matrix").classList.add("disabled");
+  $("#matrix-result").classList.add("hidden");
+  const st = $("#matrix-status");
+  st.className = "status";
+  st.textContent = "";
+}
 
 function setBar(name, pct, label) {
   $("#bar-" + name).style.width = `${Math.max(0, Math.min(100, pct))}%`;

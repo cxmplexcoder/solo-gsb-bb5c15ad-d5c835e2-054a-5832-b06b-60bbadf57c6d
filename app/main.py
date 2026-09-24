@@ -6,6 +6,11 @@
   POST /api/attack       对任务图片施加 JPEG 重压缩 / 中心裁切
   POST /api/detect       上传图片或引用任务图片 -> 水印检测结果 + 失真叠加图；
                           独立上传可选 auto_orient=true 做 8 方向自动检索
+  POST /api/jobs/{id}/robustness-matrix
+                          只读评测：至多 3 个 JPEG 质量 × 至多 3 个裁切比例，
+                          每格从同一份含水印原图独立「先裁切后压缩」再检测，
+                          返回逐格恢复文本/一致性/指标与二维最严成功边界；
+                          不改任务图片、攻击历史与检测归档
   POST /api/privacy-check  上传 PNG/JPEG -> 只读解析 EXIF 拍摄时间/相机/GPS（不落盘、不建任务）
   GET  /api/jobs/{id}/{kind}  任务文件下载（original/watermarked/target/marked）
   GET  /api/jobs/{id}/detections/{det_id}/{kind}  某次检测的输入快照 / 标注图
@@ -30,7 +35,7 @@ from PIL import Image
 from pydantic import BaseModel
 
 from . import archive, dctwm as wm
-from . import exifcheck, orientation
+from . import exifcheck, matrix, orientation
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -40,7 +45,7 @@ MAX_UPLOAD_BYTES = 16 * 1024 * 1024
 MAX_DIM = 4096
 ALLOWED_KINDS = {"original", "watermarked", "target", "marked"}
 
-app = FastAPI(title="抗裁切水印实验台", version="1.2.0")
+app = FastAPI(title="抗裁切水印实验台", version="1.3.0")
 
 
 # ---------------------------------------------------------------- 任务存储
@@ -135,6 +140,11 @@ class AttackRequest(BaseModel):
 
 class ReportRequest(BaseModel):
     detection_ids: list[str]               # 收录进报告的检测记录（至少一次）
+
+
+class RobustnessMatrixRequest(BaseModel):
+    jpeg_qualities: list[int]              # 1~3 个，20~100
+    crop_fractions: list[float]            # 1~3 个，0.30~1.00
 
 
 def _algo_params() -> dict:
@@ -240,6 +250,36 @@ def attack(req: AttackRequest):
 
 def _truthy(v: str | None) -> bool:
     return (v or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+@app.post("/api/jobs/{job_id}/robustness-matrix")
+def robustness_matrix(job_id: str, req: RobustnessMatrixRequest):
+    """鲁棒性矩阵评测（只读、全内存）。
+
+    从该任务的 watermarked.png 出发，对每个 (JPEG 质量, 裁切比例) 组合独立
+    执行「先中心裁切、后 JPEG 压缩」并调用现有检测器；逐格返回恢复文本、
+    与任务原文是否一致及同步/置信度指标，并给出只按实测成功格计算的二维
+    最严成功边界。不写 target.png、不改 meta.json/攻击历史、不产生检测
+    记录与归档文件。
+    """
+    _ensure_data_dir()
+    meta = _load_meta(job_id)
+    if meta.get("upload_only"):
+        raise HTTPException(status_code=404, detail="该任务没有含水印图。")
+    source = DATA_DIR / job_id / "watermarked.png"
+    if not source.exists():
+        raise HTTPException(status_code=404, detail="该任务没有含水印图。")
+
+    watermarked = np.array(Image.open(source).convert("RGB"))
+    try:
+        result = matrix.run_robustness_matrix(
+            watermarked, meta.get("text", ""),
+            req.jpeg_qualities, req.crop_fractions)
+    except matrix.MatrixError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    result["job_id"] = job_id
+    result["source"] = "watermarked.png（评测前只读快照，不被改写）"
+    return JSONResponse(result)
 
 
 @app.post("/api/detect")

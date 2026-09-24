@@ -90,6 +90,55 @@
       <button class="primary subtle" id="btn-detect-attacked" disabled>检测受攻击图片 ③</button>
     </section>
 
+    <section class="panel disabled" id="panel-matrix">
+      <h2><span class="num">▦</span> 鲁棒性矩阵评测（批量）</h2>
+      <p class="muted">
+        至多选择 <b>3 个 JPEG 质量</b> 与 <b>3 个中心裁切保留比例</b>，
+        服务端从<b>同一份含水印原图</b>为每个组合独立执行<b>先裁切后压缩</b>再检测。
+        评测在内存中完成，<b>不改写任务图片、攻击历史与检测归档</b>。
+      </p>
+
+      <div class="field">
+        <span>JPEG 质量（1–3 个，20–100，留空忽略）</span>
+        <div class="matrix-inputs" id="matrix-q-inputs">
+          <input type="number" class="matrix-q" min="20" max="100" step="1" value="90" />
+          <input type="number" class="matrix-q" min="20" max="100" step="1" value="50" />
+          <input type="number" class="matrix-q" min="20" max="100" step="1" value="30" />
+        </div>
+      </div>
+
+      <div class="field">
+        <span>中心裁切保留比例（1–3 个，30%–100%，留空忽略）</span>
+        <div class="matrix-inputs" id="matrix-c-inputs">
+          <input type="number" class="matrix-c" min="30" max="100" step="5" value="100" />
+          <input type="number" class="matrix-c" min="30" max="100" step="5" value="75" />
+          <input type="number" class="matrix-c" min="30" max="100" step="5" value="50" />
+        </div>
+      </div>
+
+      <button class="primary" id="btn-matrix">运行鲁棒性矩阵评测</button>
+      <div class="status" id="matrix-status"></div>
+
+      <div id="matrix-result" class="matrix-box hidden">
+        <div id="matrix-summary" class="matrix-summary"></div>
+        <div class="matrix-table-wrap">
+          <table class="matrix-table" id="matrix-table"></table>
+        </div>
+        <div class="matrix-legend">
+          <span><i class="mx mx-boundary"></i>最严成功边界</span>
+          <span><i class="mx mx-ok"></i>恢复一致</span>
+          <span><i class="mx mx-diff"></i>检测到但文本不一致</span>
+          <span><i class="mx mx-fail"></i>未恢复 / 失败</span>
+        </div>
+        <div id="matrix-boundary-list" class="matrix-boundary-list"></div>
+        <small class="muted">
+          边界只按实际成功（恢复文本与原文一致）的实测格按二维偏序计算：
+          被「质量不更高且保留比例不更大、至少一项更严」的成功格支配的格不在边界上；
+          <b>不以相邻格推断未测组合</b>。
+        </small>
+      </div>
+    </section>
+
     <section class="panel" id="panel-detect-upload">
       <h2><span class="num">③</span> 独立检测（可选）</h2>
       <p class="muted">上传任意图片（含水印图、截图、JPEG 转发件等）直接检测，无需先嵌入。</p>
